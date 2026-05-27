@@ -38,7 +38,7 @@ impl BuildConfig {
     }
     fn use_static_crt(&self) -> bool {
         self.is_windows()
-            && self.is_msvc()
+            // && self.is_msvc()
             && env::var("CARGO_CFG_TARGET_FEATURE")
                 .unwrap_or_default()
                 .split(',')
@@ -602,6 +602,13 @@ fn new_native_cpp_build(cfg: &BuildConfig) -> cc::Build {
             build.opt_level(2);
         }
         build.flag("/D_ITERATOR_DEBUG_LEVEL=0");
+    }
+    if cfg.is_windows() && !cfg.is_msvc() {
+        build.cargo_metadata(false);
+
+        println!("cargo:rustc-link-lib=static:-bundle=stdc++");
+        println!("cargo:rustc-link-lib=static=dear_imgui");
+        println!("cargo:rustc-link-search=native={}", std::env::var("OUT_DIR").unwrap());
     }
     build
 }
