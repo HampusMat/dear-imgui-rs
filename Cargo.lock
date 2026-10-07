@@ -2746,6 +2746,7 @@ version = "0.18.0"
 dependencies = [
  "bindgen",
  "cc",
+ "cmake",
  "dear-imgui-build-support",
  "flate2",
  "glam",

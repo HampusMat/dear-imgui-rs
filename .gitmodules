@@ -30,3 +30,18 @@
 	path = extensions/dear-imgui-cte-sys/third-party/cimCTE
 	url = https://github.com/cimgui/cimCTE
 	branch = main_goossens
+[submodule "dear-imgui-sys/third-party/libpng"]
+	path = dear-imgui-sys/third-party/libpng
+	url = https://github.com/pnggroup/libpng
+[submodule "dear-imgui-sys/third-party/zlib"]
+	path = dear-imgui-sys/third-party/zlib
+	url = https://github.com/madler/zlib
+[submodule "dear-imgui-sys/third-party/brotli"]
+	path = dear-imgui-sys/third-party/brotli
+	url = https://github.com/google/brotli
+[submodule "dear-imgui-sys/third-party/harfbuzz"]
+	path = dear-imgui-sys/third-party/harfbuzz
+	url = https://github.com/harfbuzz/harfbuzz
+[submodule "dear-imgui-sys/third-party/freetype"]
+	path = dear-imgui-sys/third-party/freetype
+	url = https://gitlab.freedesktop.org/freetype/freetype

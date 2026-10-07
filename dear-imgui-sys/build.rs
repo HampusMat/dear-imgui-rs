@@ -1,6 +1,7 @@
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::ffi::{OsStr, OsString};
 
 use build_support::binding::{
     ArtifactProfile, ArtifactProfileInput, BindingSpec, BuildRequest, BuildRequestInput,
@@ -329,6 +330,9 @@ fn main() {
         );
     }
 
+    #[cfg(feature = "freetype")]
+    build_freetype_with_cmake(&cfg);
+
     // Bindings: prefer the checked-in pregenerated bindings for normal builds. This keeps
     // source builds free of a libclang runtime dependency while still compiling the native
     // C++ objects and PlatformIO hook shim below. Maintainers can opt into bindgen with
@@ -540,18 +544,255 @@ fn assert_canonical_bindgen_environment() {
 }
 
 #[cfg(feature = "freetype")]
-fn find_freetype_dependency(emit_cargo_metadata: bool) -> build_support::NativeDependency {
-    let dependency = build_support::find_freetype(build_support::PackageSearchConfig {
-        use_pkg_config: cfg!(feature = "pkg-config"),
-        use_vcpkg: cfg!(feature = "vcpkg"),
-        emit_cargo_metadata,
-    })
-    .unwrap_or_else(|message| panic!("dear-imgui-sys: {message}"));
-    println!(
-        "cargo:warning=dear-imgui-sys: using FreeType from {}",
-        dependency.source
+fn build_freetype_with_cmake(cfg: &BuildConfig) -> bool {
+    let freetype_root = cfg.manifest_dir.join("third-party/freetype");
+
+    let freetype_deps_install_prefix_path = cfg.out_dir.join("freetype-deps-install-prefix");
+
+    let cmake_find_package_configs_path = cfg.manifest_dir.join("cmake-find-package-configs");
+
+    println!("cargo:rustc-link-search=native={}", freetype_deps_install_prefix_path.join("lib").display());
+
+    build_dependency_of_freetype_with_cmake(
+        cfg,
+        "zlib",
+        &[if cfg.target_os == "windows" {
+            if cfg.is_debug() {
+                "zsd"
+            } else {
+                "zs"
+            }
+        } else {
+            "z"
+        }],
+        &[
+            ("ZLIB_BUILD_TESTING", OsStr::new("FALSE")),
+            ("ZLIB_BUILD_SHARED", OsStr::new("FALSE")),
+            ("CMAKE_INSTALL_PREFIX", freetype_deps_install_prefix_path.as_os_str())
+        ]
     );
-    dependency
+
+    build_dependency_of_freetype_with_cmake(
+        cfg,
+        "libpng",
+        &["png"],
+        &[
+            ("PNG_TESTS", OsStr::new("FALSE")),
+            ("PNG_TOOLS", OsStr::new("FALSE")),
+            ("PNG_SHARED", OsStr::new("FALSE")),
+            ("ZLIB_INCLUDE_DIRS", freetype_deps_install_prefix_path.join("include").as_os_str()),
+            // ("ZLIB_FIND_COMPONENTS", "static"),
+            ("CMAKE_INSTALL_PREFIX", freetype_deps_install_prefix_path.as_os_str()),
+            ("CMAKE_PREFIX_PATH", &[cmake_find_package_configs_path.as_os_str(), OsStr::new(";"), freetype_deps_install_prefix_path.as_os_str()].into_iter().collect::<OsString>()),
+        ]
+    );
+
+    // std::fs::copy(cfg.manifest_dir.join("third-party/libpng/png.h"), prefix_path.join("include/png.h")).unwrap();
+
+    build_dependency_of_freetype_with_cmake(
+        cfg,
+        "brotli",
+        &["brotlidec", "brotlicommon", "brotlienc"],
+        &[
+            ("BROTLI_BUILD_TOOLS", OsStr::new("FALSE")),
+            // ("BROTLI_BUILD_FOR_PACKAGE", "1")
+            ("CMAKE_INSTALL_PREFIX", freetype_deps_install_prefix_path.as_os_str())
+        ]
+    );
+
+    build_dependency_of_freetype_with_cmake(
+        cfg,
+        "harfbuzz",
+        &["harfbuzz"],
+        &[
+            ("HB_BUILD_SUBSET", OsStr::new("FALSE")),
+            ("CMAKE_INSTALL_PREFIX", freetype_deps_install_prefix_path.as_os_str())
+        ]
+    );
+
+    println!("cargo:warning=Building freetype with CMake");
+
+
+    let mut c = cmake::Config::new(freetype_root);
+
+    c.out_dir(cfg.out_dir.join("freetype_out"));
+
+    c.very_verbose(true);
+
+    c.define("BUILD_SHARED_LIBS", "FALSE");
+
+    c.define("CMAKE_FIND_PACKAGE_PREFER_CONFIG", "TRUE");
+
+    c.define("CMAKE_PREFIX_PATH", [cmake_find_package_configs_path.as_os_str(), OsStr::new(";"), freetype_deps_install_prefix_path.as_os_str()].into_iter().collect::<OsString>());
+
+    // c.define("CMAKE_FIND_LIBRARY_SUFFIXES", ".a;.lib");
+
+    // c.define("ZLIB_FIND_COMPONENTS", "static");
+
+    c.define("FT_DISABLE_BZIP2", "TRUE");
+
+    c.define("FT_REQUIRE_BROTLI", "TRUE");
+    c.define("FT_REQUIRE_ZLIB", "TRUE");
+    c.define("FT_REQUIRE_PNG", "TRUE");
+    c.define("FT_REQUIRE_HARFBUZZ", "TRUE");
+
+    c.define("FT_DYNAMIC_HARFBUZZ", "FALSE");
+
+    // for define in native_binding_spec().resolved_extension_binding_defines(env::vars()) {
+    //     c.cxxflag(define.clang_arg());
+    // }
+
+    let profile = env::var("PROFILE").unwrap_or_else(|_| "release".into());
+
+    let cmake_profile = if cfg.is_msvc() && cfg.is_windows() && profile == "debug" {
+        "RelWithDebInfo"
+    } else if profile == "debug" {
+        "Debug"
+    } else {
+        "Release"
+    };
+
+    c.profile(cmake_profile);
+
+    if cfg.is_msvc() && cfg.is_windows() {
+        let tf = env::var("CARGO_CFG_TARGET_FEATURE").unwrap_or_default();
+        let use_static = tf.split(',').any(|f| f == "crt-static");
+        let msvc_runtime = if use_static {
+            "MultiThreaded"
+        } else {
+            "MultiThreadedDLL"
+        };
+        c.define("CMAKE_MSVC_RUNTIME_LIBRARY", msvc_runtime);
+    }
+
+    let dst = c.build();
+
+    println!("cargo:warning=freetype destination: {}", dst.display());
+
+    let candidates = [
+        dst.join("lib"),
+        dst.join("build"),
+        dst.clone(),
+        dst.join("build").join("Release"),
+        dst.join("build").join("RelWithDebInfo"),
+        dst.join("build").join("Debug"),
+        dst.join("Release"),
+        dst.join("RelWithDebInfo"),
+        dst.join("Debug"),
+    ];
+
+    let mut found = false;
+
+    for lib_dir in &candidates {
+        if lib_dir.exists() {
+            println!("cargo:rustc-link-search=native={}", lib_dir.display());
+            found = true;
+        }
+    }
+
+    if !found {
+        println!("cargo:warning=Could not locate CMake lib output dir for freetype; linking may fail");
+    }
+
+    if profile == "debug" {
+        println!("cargo:rustc-link-lib=static=freetyped");
+    } else {
+        println!("cargo:rustc-link-lib=static=freetype");
+    }
+
+    // println!("cargo:rustc-link-search=native={}", cfg.manifest_dir.join("freetype-install-prefix/lib").display());
+    //
+    // println!("cargo:rustc-link-lib=static=z");
+
+    true
+}
+
+#[cfg(feature = "freetype")]
+fn build_dependency_of_freetype_with_cmake<DefineValue>(
+    cfg: &BuildConfig,
+    dependency_name: &str,
+    dependency_lib_names: &[&str],
+    extra_defines: &[(&str, DefineValue)]
+) -> bool
+where
+DefineValue: AsRef<OsStr>
+{
+
+    println!("cargo:warning=Building dependency {dependency_name} of freetype with CMake");
+
+
+    let mut c = cmake::Config::new(cfg.manifest_dir.join("third-party").join(dependency_name));
+
+    c.out_dir(cfg.out_dir.join(format!("{dependency_name}_out")));
+
+    c.very_verbose(true);
+
+    c.define("BUILD_SHARED_LIBS", "FALSE");
+
+    c.define("CMAKE_FIND_PACKAGE_PREFER_CONFIG", "TRUE");
+
+    // c.define("CMAKE_FIND_LIBRARY_SUFFIXES", ".a;.lib");
+
+    for (key, value) in extra_defines {
+        c.define(key, value);
+    }
+
+    // for define in native_binding_spec().resolved_extension_binding_defines(env::vars()) {
+    //     c.cxxflag(define.clang_arg());
+    // }
+
+    let profile = env::var("PROFILE").unwrap_or_else(|_| "release".into());
+
+    let cmake_profile = if cfg.is_msvc() && cfg.is_windows() && profile == "debug" {
+        "RelWithDebInfo"
+    } else if profile == "debug" {
+        "Debug"
+    } else {
+        "Release"
+    };
+
+    c.profile(cmake_profile);
+
+    if cfg.is_msvc() && cfg.is_windows() {
+        let tf = env::var("CARGO_CFG_TARGET_FEATURE").unwrap_or_default();
+        let use_static = tf.split(',').any(|f| f == "crt-static");
+        let msvc_runtime = if use_static {
+            "MultiThreaded"
+        } else {
+            "MultiThreadedDLL"
+        };
+        c.define("CMAKE_MSVC_RUNTIME_LIBRARY", msvc_runtime);
+    }
+
+    c.build();
+
+    for dependency_lib in dependency_lib_names {
+        println!("cargo:rustc-link-lib=static={dependency_lib}");
+    }
+
+    true
+}
+
+#[cfg(feature = "freetype")]
+fn find_freetype_dependency(cfg: &BuildConfig) -> build_support::NativeDependency {
+    build_support::NativeDependency {
+include_paths: vec![
+    cfg.manifest_dir.join("third-party/freetype/include"),
+], source: "pkg-config (freetype2)".to_owned()
+// include_paths: ["/usr/include/freetype2", "/usr/include", "/usr/include/libpng16"], source: "pkg-config (freetype2)"
+    }
+
+    // let dependency = build_support::find_freetype(build_support::PackageSearchConfig {
+    //     use_pkg_config: cfg!(feature = "pkg-config"),
+    //     use_vcpkg: cfg!(feature = "vcpkg"),
+    //     emit_cargo_metadata,
+    // })
+    // .unwrap_or_else(|message| panic!("dear-imgui-sys: {message}"));
+    // println!(
+    //     "cargo:warning=dear-imgui-sys: using FreeType from {}",
+    //     dependency.source
+    // );
+    // dependency
 }
 
 fn try_link_prebuilt_all(cfg: &BuildConfig) -> bool {
@@ -713,7 +954,11 @@ fn build_with_cc_cfg(
     }
     #[cfg(feature = "freetype")]
     {
-        let freetype = find_freetype_dependency(true);
+        let freetype = find_freetype_dependency(cfg);
+
+
+        println!("cargo:warning=freetype dependency: {freetype:?}");
+
         // Enable both FreeType and stb_truetype backends.
         // ImGui 1.92 gates stb_truetype helpers (e.g. ImFontAtlasGetFontLoaderForStbTruetype)
         // behind IMGUI_ENABLE_STB_TRUETYPE, while FreeType is selected when IMGUI_ENABLE_FREETYPE is defined.
@@ -1240,12 +1485,7 @@ fn try_link_prebuilt(dir: &Path, cfg: &BuildConfig) -> bool {
         &cfg.target_env,
         &cfg.target_abi,
     );
-    #[cfg(feature = "freetype")]
-    {
-        // A freetype-enabled dear_imgui static prebuilt still references the
-        // FreeType library. Emit the same native link metadata as source builds.
-        let _ = find_freetype_dependency(true);
-    }
+
     println!("cargo:ARTIFACT_PROFILE_HASH={}", identity.profile_hash);
     println!(
         "cargo:ARTIFACT_IDENTITY_HASH={}",
